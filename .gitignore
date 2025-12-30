@@ -3,6 +3,17 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+checkpoints/.cache/
+checkpoints/checkpoints/
+results/
+notebook/gaussians/
+notebook/images/
+data4paper/
+/*.svg
+/*.png
+/*.jpg
+nohup.out
+
 # C extensions
 *.so
 
