@@ -2,7 +2,6 @@ import numpy as np
 import os
 from nilearn import image
 import nibabel as nib
-import argparse
 
 def segment_and_crop_objects(intensity_nii_path, mask_nii_path, output_dir="segmented_objects"):
     """
@@ -17,7 +16,9 @@ def segment_and_crop_objects(intensity_nii_path, mask_nii_path, output_dir="segm
     mask_vol = image.load_img(mask_nii_path)
 
     # --- MODIFICATION START: Extract base name ---
+    # Get filename "image.nii.gz", then strip extensions to get "image"
     filename = os.path.basename(intensity_nii_path)
+    # Split at .nii to handle both .nii and .nii.gz robustly
     base_name = filename.split('.nii')[0] 
     # --- MODIFICATION END ---
     
@@ -46,31 +47,16 @@ def segment_and_crop_objects(intensity_nii_path, mask_nii_path, output_dir="segm
         )
         
         # 3. Crop to Bounding Box
-        # --- MODIFICATION START: Crop mask first, then align image ---
-        # We crop the mask first to define the true bounding box of the non-zero label
-        cropped_mask = image.crop_img(binary_mask)
-        
-        # We resample the masked object to the cropped_mask geometry.
-        # This guarantees the image and mask have the EXACT same shape and affine.
-        # (If we cropped them independently, 'dark' pixels at the edge of the object 
-        # might cause the image crop to be smaller than the mask crop).
-        cropped_object = image.resample_to_img(masked_object, cropped_mask)
-        # --- MODIFICATION END ---
+        cropped_object = image.crop_img(masked_object)
         
         # 4. Save to file
         # --- MODIFICATION START: Update naming convention ---
         # Format: image_[object_id].nii.gz
-        save_path_img = os.path.join(output_dir, f"{base_name}_{label_id}.nii.gz")
-        # Format: image_[object_id]_mask.nii.gz
-        save_path_mask = os.path.join(output_dir, f"{base_name}_{label_id}_mask.nii.gz")
+        save_path = os.path.join(output_dir, f"{base_name}_{label_id}.nii.gz")
         # --- MODIFICATION END ---
         
-        nib.save(cropped_object, save_path_img)
-        nib.save(cropped_mask, save_path_mask)
-        
-        print(f"  Saved Image: {save_path_img} (Shape: {cropped_object.shape})")
-        # print(f"  Saved Mask : {save_path_mask} (Shape: {cropped_mask.shape})")
-
+        nib.save(cropped_object, save_path)
+        print(f"  Saved to: {save_path} (Shape: {cropped_object.shape})")
 
 def get_image_mask_pairs(root_dir, type="airways"):
     """
@@ -113,12 +99,7 @@ def get_image_mask_pairs(root_dir, type="airways"):
 
     return data_pairs
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--type", default="lungs", type=str,
-                    help='Type of dataset/task ("airways" or "lungs")')
-args = parser.parse_args()
-
-type = args.type  # "airways" or "lungs"
+type = "lungs"  # "airways" or "lungs"
 input_folder = "/PHShome/yl535/project/python/datasets/AeroPath/data" 
 output_dir = f"/PHShome/yl535/project/python/datasets/AeroPath/{type}_segmented" 
 

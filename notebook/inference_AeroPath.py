@@ -8,11 +8,55 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import requests
 from transformers import pipeline
+from pathlib import Path
+from typing import List, Tuple
+import argparse
 
 import os
 import imageio
 import uuid
 from inference import Inference, ready_gaussian_for_video_rendering, render_video, load_image, load_single_mask, display_image, make_scene, interactive_visualizer
+
+def get_image_mask_pairs(root_dir, type="airways"):
+    """
+    Traverses subfolders named [id] and finds matching CT/Mask pairs.
+    """
+    data_pairs = []
+    
+    # 1. Get all subfolders in the root directory
+    # We filter to ensure we only look at directories
+    subfolders = [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
+    
+    # 2. Sort them numerically (so we process 1, 2, ... 10, instead of 1, 10, 2)
+    # If folder names are not pure integers, this falls back to string sorting
+    try:
+        subfolders.sort(key=lambda x: int(x))
+    except ValueError:
+        subfolders.sort()
+
+    print(f"Found {len(subfolders)} patient folders.")
+
+    for case_id in subfolders:
+        case_path = os.path.join(root_dir, case_id)
+        
+        # 3. Construct specific filenames based on the pattern
+        # Pattern: [id]_CT_HR.nii.gz AND [id]_CT_HR_label_airways.nii.gz
+        img_name = f"{case_id}_CT_HR.nii.gz"
+        mask_name = f"{case_id}_CT_HR_label_{type}.nii.gz"
+        
+        img_full_path = os.path.join(case_path, img_name)
+        mask_full_path = os.path.join(case_path, mask_name)
+        
+        # 4. Verify files exist before adding to list
+        if os.path.exists(img_full_path) and os.path.exists(mask_full_path):
+            data_pairs.append((img_full_path, mask_full_path))
+        else:
+            print(f"Warning: Missing files in folder {case_id}")
+            # Optional: Check which one is missing for debugging
+            if not os.path.exists(img_full_path): print(f"  - Missing: {img_name}")
+            if not os.path.exists(mask_full_path): print(f"  - Missing: {mask_name}")
+
+    return data_pairs
 
 def show_masks(image, masks):
     """
@@ -65,12 +109,80 @@ def get_object_middle_index(mask_data, label_id, axis=2):
     
     return middle_index
 
+# def extract_all_objects_middle_slices(intensity_nii_path, mask_nii_path, axis=2):
+#     """
+#     Function 2: Iteratively obtains the segmented object from the middle slice 
+#     of each unique label found in the mask.
+#     Returns a Dictionary: { label_id: 2D_numpy_array }
+#     """
+#     # Load data
+#     img_nii = nib.load(intensity_nii_path)
+#     mask_nii = nib.load(mask_nii_path)
+    
+#     img_data = img_nii.get_fdata()
+#     mask_data = mask_nii.get_fdata()
+    
+#     # Handle 4D images (take first volume)
+#     if img_data.ndim == 4:
+#         img_data = img_data[..., 0]
+
+#     # Find all unique objects (excluding background 0)
+#     unique_labels = np.unique(mask_data)
+#     object_ids = unique_labels[unique_labels != 0].astype(int)
+    
+#     results = {}
+    
+#     print(f"Found {len(object_ids)} objects. Extracting middle slices...")
+    
+#     for label_id in object_ids:
+#         # 1. Determine the middle slice for this specific object
+#         mid_idx = get_object_middle_index(mask_data, label_id, axis)
+        
+#         if mid_idx is None:
+#             continue
+            
+#         # 2. Slice the arrays
+#         if axis == 0:
+#             slice_img = img_data[mid_idx, :, :]
+#             slice_mask = mask_data[mid_idx, :, :]
+#         elif axis == 1:
+#             slice_img = img_data[:, mid_idx, :]
+#             slice_mask = mask_data[:, mid_idx, :]
+#         else: # axis == 2
+#             slice_img = img_data[:, :, mid_idx]
+#             slice_mask = mask_data[:, :, mid_idx]
+            
+#         # 3. Apply mask (Segment the object)
+#         # Only keep pixels belonging to THIS label
+#         segmented_slice = np.where(slice_mask == label_id, slice_img, 0)
+        
+#         # 4. Optional: Crop 2D to remove excess black background
+#         # This makes visualization much better
+#         non_zero = np.argwhere(segmented_slice)
+#         if non_zero.size > 0:
+#             top_left = non_zero.min(axis=0)
+#             bottom_right = non_zero.max(axis=0)
+#             segmented_slice = segmented_slice[top_left[0]:bottom_right[0]+1, top_left[1]:bottom_right[1]+1]
+            
+#         results[label_id] = segmented_slice
+        
+#     return results
+
+def to_uint8_image(arr):
+    # 1. Normalize array to range [0, 1]
+    # (Avoid division by zero if max == min)
+    if arr.max() == arr.min():
+        arr_normalized = np.zeros_like(arr)
+    else:
+        arr_normalized = (arr - arr.min()) / (arr.max() - arr.min())
+    
+    # 2. Scale to [0, 255]
+    arr_scaled = arr_normalized * 255
+    
+    # 3. Cast to uint8
+    return arr_scaled.astype(np.uint8)
+
 def extract_all_objects_middle_slices(intensity_nii_path, mask_nii_path, axis=2):
-    """
-    Function 2: Iteratively obtains the segmented object from the middle slice 
-    of each unique label found in the mask.
-    Returns a Dictionary: { label_id: 2D_numpy_array }
-    """
     # Load data
     img_nii = nib.load(intensity_nii_path)
     mask_nii = nib.load(mask_nii_path)
@@ -78,26 +190,24 @@ def extract_all_objects_middle_slices(intensity_nii_path, mask_nii_path, axis=2)
     img_data = img_nii.get_fdata()
     mask_data = mask_nii.get_fdata()
     
-    # Handle 4D images (take first volume)
+    # --- FIX 1: Handle 4D masks (just like you did for images) ---
     if img_data.ndim == 4:
         img_data = img_data[..., 0]
+    if mask_data.ndim == 4:
+        mask_data = mask_data[..., 0]
 
-    # Find all unique objects (excluding background 0)
     unique_labels = np.unique(mask_data)
     object_ids = unique_labels[unique_labels != 0].astype(int)
     
-    results = {}
-    
     print(f"Found {len(object_ids)} objects. Extracting middle slices...")
     
+    results = []
     for label_id in object_ids:
-        # 1. Determine the middle slice for this specific object
         mid_idx = get_object_middle_index(mask_data, label_id, axis)
         
         if mid_idx is None:
             continue
             
-        # 2. Slice the arrays
         if axis == 0:
             slice_img = img_data[mid_idx, :, :]
             slice_mask = mask_data[mid_idx, :, :]
@@ -107,21 +217,14 @@ def extract_all_objects_middle_slices(intensity_nii_path, mask_nii_path, axis=2)
         else: # axis == 2
             slice_img = img_data[:, :, mid_idx]
             slice_mask = mask_data[:, :, mid_idx]
-            
-        # 3. Apply mask (Segment the object)
-        # Only keep pixels belonging to THIS label
-        segmented_slice = np.where(slice_mask == label_id, slice_img, 0)
         
-        # 4. Optional: Crop 2D to remove excess black background
-        # This makes visualization much better
-        non_zero = np.argwhere(segmented_slice)
-        if non_zero.size > 0:
-            top_left = non_zero.min(axis=0)
-            bottom_right = non_zero.max(axis=0)
-            segmented_slice = segmented_slice[top_left[0]:bottom_right[0]+1, top_left[1]:bottom_right[1]+1]
-            
-        results[label_id] = segmented_slice
+        # 1. Expand Image to 3 Channels (RGB)
+        slice_img = np.repeat(slice_img[:, :, np.newaxis], 3, axis=2)
+        slice_img = to_uint8_image(slice_img)
+        slice_mask = np.squeeze(slice_mask)
         
+        results.append((slice_img, slice_mask, label_id))
+            
     return results
 
 def visualize_segmented_object(segmented_slice, label_id):
@@ -138,46 +241,106 @@ def visualize_segmented_object(segmented_slice, label_id):
     plt.tight_layout()
     plt.show()
 
-config_path = f"/PHShome/yl535/project/python/sam_3d/sam-3d-objects/checkpoints/checkpoints/pipeline.yaml"
-inference = Inference(config_path, compile=False)
+def find_image_mask_pairs(input_folder: str, recursive: bool = True) -> List[Tuple[Path, Path]]:
+    p = Path(input_folder)
+    it = p.rglob("*.nii.gz") if recursive else p.glob("*.nii.gz")
 
-device = 0 if torch.cuda.is_available() else -1
-generator = pipeline(
-    "mask-generation", 
-    model="facebook/sam2-hiera-large", 
-    device=device,
-    torch_dtype=torch.float32 
-)
+    images = {}  # key -> image path
+    masks  = {}  # key -> mask path
 
-type = "lungs"  # "airways" or "lungs"
-input_folder = "/PHShome/yl535/project/python/datasets/AeroPath/data" 
-output_dir = f"/PHShome/yl535/project/python/sam_3d/sam-3d-objects/results_AeroPath/" 
+    for f in it:
+        name = f.name
+        if name.endswith("_mask.nii.gz"):
+            key = name[:-len("_mask.nii.gz")]          # e.g., "10_CT_HR_1"
+            masks[key] = f
+        else:
+            key = name[:-len(".nii.gz")]               # e.g., "10_CT_HR_1"
+            images[key] = f
 
-pairs = get_image_mask_pairs(input_folder, type=type)
+    pairs = [(images[k], masks[k]) for k in sorted(images.keys() & masks.keys())]
+    return pairs
 
-print(f"\nSuccessfully loaded {len(pairs)} pairs.")
-os.makedirs(output_dir, exist_ok=True)
-# Example loop to process them
-for img_path, mask_path in pairs:
-    filename = os.path.basename(img_path)
-    base_name = filename.split('.nii')[0] 
-    print(f"Processing: {os.path.basename(img_path)}, {os.path.basename(mask_path)}")
+if __name__ == "__main__":
 
-    extracted_objects = extract_all_objects_middle_slices(img_path, mask_path, axis=2)
-    for label_id, slice_data in extracted_objects.items():
-        print(label_id)
-        print(type(slice_data))
-        save_path = os.path.join(output_dir, f"{base_name}_{label_id:02d}.nii.gz")
-        nib.save(slice_data, save_path)
+    parser = argparse.ArgumentParser(description="Inference")
+    
+    parser.add_argument(
+        '--config_path', 
+        type=str, 
+        required=True,
+        help='Path to the configuration YAML file.'
+    )
+    parser.add_argument(
+        '--input_folder', 
+        type=str, 
+        required=True,
+        help='Path to the folder containing input NIfTI files.'
+    )
+    parser.add_argument(
+        '--output_folder', 
+        type=str, 
+        required=True,
+        help='Path to the folder to save output results.'
+    )
+    parser.add_argument(
+        '--slice_axis', 
+        type=int, 
+        default=2,
+        help='Path to the folder to save output results.'
+    )
+    
+    args = parser.parse_args()
 
-    seg_slice = get_middle_slice_segmentation(img_path, mask_path, axis=2)
+    config_path = args.config_path # f"/PHShome/yl535/project/python/sam_3d/sam-3d-objects/checkpoints/checkpoints/pipeline.yaml"
+    # type = "lungs"  # "airways" or "lungs"
+    input_folder = args.input_folder # f"/PHShome/yl535/project/python/datasets/AeroPath/lungs_segmented" 
+    output_dir = args.output_folder  # f"/PHShome/yl535/project/python/sam_3d/sam-3d-objects/results_AeroPath/lungs" 
 
-    output = inference(image_np, masks[mask_index], seed=42)
+    inference = Inference(config_path, compile=False)
 
-    # export gaussian splat (as point cloud)
-    output["gs"].save_ply(f"{PATH}/gaussians/single/{IMAGE_NAME}.ply")
+    device = 0 if torch.cuda.is_available() else -1
+    generator = pipeline(
+        "mask-generation", 
+        model="facebook/sam2-hiera-large", 
+        device=device,
+        torch_dtype=torch.float32 
+    )
 
-    # segment_and_crop_objects(img_path, mask_path, output_dir=output_dir)
+    # create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
-    # output = inference(image_np, masks[mask_index], seed=42)
-    # output["gs"].save_ply(f"{PATH}/gaussians/single/{IMAGE_NAME}.ply")
+    pairs = find_image_mask_pairs(input_folder)
+    for scan_path,mask_path  in pairs:
+        print("IMG :", scan_path.name)
+        print("MASK:", mask_path.name)
+        objs = extract_all_objects_middle_slices(scan_path, mask_path, axis=args.slice_axis)
+        extracted_scan, extracted_mask = objs[0][0], objs[0][1]
+        # print(f"Shape: {extracted_scan.shape}, Type: {extracted_scan.dtype}")
+        # print(f"Unique mask values: {np.unique(extracted_scan)}")
+        # print(f"Shape: {extracted_mask.shape}, Type: {extracted_mask.dtype}")
+        # print(f"Unique mask values: {np.unique(extracted_mask)}")
+        # sys.exit()
+        output = inference(extracted_scan, extracted_mask, seed=42)
+
+        output["gs"].save_ply(f"{output_dir}/{scan_path.name}.ply")
+
+        scene_gs = make_scene(output)
+        scene_gs = ready_gaussian_for_video_rendering(scene_gs)
+
+        video = render_video(
+            scene_gs,
+            r=1,
+            fov=60,
+            pitch_deg=15,
+            yaw_start_deg=-45,
+            resolution=512,
+        )["color"]
+
+        # save video as gif
+        imageio.mimsave(
+            os.path.join(f"{output_dir}/{scan_path.name}.gif"),
+            video,
+            format="GIF",
+            duration=1000 / 30,  # default assuming 30fps from the input MP4
+            loop=0,  # 0 means loop indefinitely
+        )
