@@ -1,0 +1,6 @@
+dataset_name: "AeroPath"
+root_dir: "data"
+mask_type: "lungs"
+plane: "coronal"
+num_inference_steps: 15
+n_sample_points: 100000

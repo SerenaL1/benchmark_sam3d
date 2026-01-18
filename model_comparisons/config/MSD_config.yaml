@@ -1,0 +1,5 @@
+dataset_name: "MSD"
+root_dir: "data"
+plane: "coronal"
+num_inference_steps: 15
+n_sample_points: 100000
