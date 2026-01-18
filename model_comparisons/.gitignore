@@ -1,0 +1,9 @@
+*.pth
+*.pt
+*.nii
+*.nii.gz
+*.png
+*.glb
+*.ply
+*.gif
+__pycache__/
